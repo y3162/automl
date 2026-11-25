@@ -28,7 +28,7 @@ Experimentが起動前に読み込むYAMLの構造、継承、パス解決、確
 
 ## パスの解決
 
-YAMLに記載するファイルパスは、`configs/` や `data/` があるプロジェクトルートからの相対パスとする。`extends` と、個別実装がファイルパスとして受け取る設定項目に同じ基準を適用する。大規模コーパスは `data/corpora/` 内のシンボリックリンクを指せる。
+YAMLに記載するファイルパスは、`configs/` や `data/` があるプロジェクトルートからの相対パスとする。`extends` と、個別実装がファイルパスとして受け取る設定項目に同じ基準を適用する。再現実験の YAML は `configs/` に置く。公式の分割やデータ作成手順を使う場合は `recipes/` の定義を、外部コーパスのファイルを読む場合は `data/corpora/<corpus_id>/` を通るパスを指定する。 [正本と実験の定義](../90_operations_and_maintenance/01_data_and_backup.md#正本と実験の定義)
 
 Python APIの `source` がプロジェクトルートを指定する。省略時とCLIからの起動時はカレントディレクトリを使う。Experimentは、別プロセスで実行する際にも、受付時に確定したプロジェクトルートをパス解決に使う。`root` は、履歴や成果物を保存するデータルートを指定する。
 
@@ -39,7 +39,7 @@ components:
   dataset:
     implementation: examples.xor.components.data.CsvDataset
     settings:
-      path: data/examples/xor/raw/samples.csv
+      path: data/corpora/xor_csv/samples.csv
   model:
     implementation: examples.xor.components.model.TinyMLP
     settings:

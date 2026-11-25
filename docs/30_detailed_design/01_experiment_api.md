@@ -4,7 +4,9 @@
 
 ## 操作
 
-Pythonでは `Experiment(root, *, source=None, read_only=False)` を使う。パスには文字列または `Path` を指定できる。`root` はプロジェクトデータのルート、`source` は実装の読み込みとYAML内のパス解決の基準となるプロジェクトルートで、省略時はカレントディレクトリとする。CLIはカレントディレクトリをプロジェクトルートとし、共通オプション `--root ROOT` でデータルートを指定する。データルートの省略時は `data/store` とする。XOR の例も既定のストアを使う。[configの詳細設計](02_configuration.md)
+Pythonでは `Experiment(root, *, source=None, read_only=False)` を使う。パスには文字列または `Path` を指定できる。`root` は正本を保存するデータルート、`source` は実装の読み込みと YAML 内のパス解決の基準となるプロジェクトルートで、省略時はカレントディレクトリとする。CLI はカレントディレクトリをプロジェクトルートとし、共通オプション `--root ROOT` を省略すると `data/store/` を使う。 [config の詳細設計](02_configuration.md)
+
+XOR の通常実行例も標準の `data/store/` を使う。自動テストでは `root` または `--root` に `data/mock/store/` 配下のテスト専用ディレクトリを指定する。 [テスト用の正本](../90_operations_and_maintenance/01_data_and_backup.md#テスト用の正本)
 
 | Python API | CLI | 成功時の戻り値 |
 |---|---|---|
@@ -13,6 +15,7 @@ Pythonでは `Experiment(root, *, source=None, read_only=False)` を使う。パ
 | `resume(branch, *, request_id=None)` | `resume BRANCH [--request-id ID]` | 同じ枝に追加した実行のID。CLIは `run_id` を含むJSON |
 | `stop(run)` | `stop RUN` | Pythonは `None`、CLIは `run_id` と `stop_requested: true` を含むJSON |
 | `status(run, *, reconcile=False)` | `status RUN` | 指定実行の状態 |
+| | `wait RUN [--timeout SECONDS]` | 終了または待ち時間の上限に達した時点の状態 |
 | `delete_checkpoint(checkpoint_id)` | `delete-checkpoint CHECKPOINT_ID` | `checkpoint_id` と `result`。使用中は `in_use`、削除完了時と削除済みのIDへの再依頼は `deleted` |
 | `record_decision(run, evaluation, decision, *, aggregate_id=None, followup_run=None, request_id=None)` | `record-decision RUN EVALUATION DECISION [--aggregate-id ID] [--followup-run RUN] [--request-id ID]` | Pythonは判断ID、CLIは `decision_id` を含むJSON |
 | `history(run=None, *, summary=False)` | `history [--run RUN] [--summary]` | 枝、実行、イベント、成果物の記録 |
@@ -24,7 +27,7 @@ Pythonでは `Experiment(root, *, source=None, read_only=False)` を使う。パ
 
 枝ID・実行ID・成果物IDは文字列として扱う。`REF` にはチェックポイントの成果物ID、実行ID、または `RUN:latest` を指定できる。実行IDだけを指定した場合は `RUN:latest` として扱う。`latest` は対象の実行で保持している再開可能な保存点のうち学習順で最後のものを指す。成績に基づく選択は個別実装が行い、保存点IDを指定する。参照が解決された先の成果物IDを履歴に残す。分岐元の実行とチェックポイントを両方指定する場合は、チェックポイントがその実行の成果物であることを確認する。[チェックポイントと学習再開](../20_basic_design/05_checkpoints_and_resume.md)
 
-`delete_checkpoint("C200")` の受付時に評価がその保存点をコピーしていれば、通常の戻り値 `{"checkpoint_id": "C200", "result": "in_use"}` を返し、削除依頼はそこで終了する。コピーの完了後、管理側は同じIDで改めて削除を依頼できる。削除途中で停止した場合も同じIDで続行できる。[使用中の保存点と削除](04_checkpoint_management.md#使用中の保存点と削除)
+`delete_checkpoint("C200")` の受付時に評価側がその保存点をコピーしている途中なら、通常の戻り値 `{"checkpoint_id": "C200", "result": "in_use"}` を返し、削除依頼はそこで終了する。コピーの完了後、管理側は同じIDで改めて削除を依頼できる。削除途中で停止した場合も同じIDで続行できる。[使用中の保存点と削除](04_checkpoint_management.md#使用中の保存点と削除)
 
 削除が先に始まった保存点を指定して新たに評価を起動すると、受付前に `invalid_request` を返す。`details` には `checkpoint_id` と `checkpoint_state`（`deleting` または `deleted`）を含める。新しい実行IDは発行しない。指定したIDに該当する保存点の記録自体がなければ `not_found` とする。
 
@@ -58,6 +61,7 @@ configの `plan` に実行する処理を順に指定する。`[train]`、`[eval
 |---|---|
 | 学習のみ、または学習の後に評価 | 必要に応じて `initialize` で学習の初期状態を指定する。部分初期化では `retain` に引き継ぐ名前を指定する。学習後の評価に使う保存点はタスク側が選び、ExperimentにIDを渡す。候補が0件なら、実行中のタスクが終了前に、実験の意図に応じた見送りか失敗かと理由を報告する |
 | モデルまたは予測結果を使う評価のみの実行 | チェックポイント参照（`evaluate`）、プロジェクト内の予測成果物ID（`prediction_artifact`）、外部の予測ファイル（`predictions`）のいずれか一つを指定する |
+| 保存済み測定だけを再集計する評価のみの実行 | 評価設定で再集計の手順を選ぶ。モデル状態や予測ファイルの指定は省略できる |
 
 保存済みの測定結果の再集計には、入力の評価と採用した結果を使う。訂正・再集計を参照用に保存する段階で、それを行った実行に新しい評価IDを付ける。後日行う場合は新しい評価のみの実行に属する。保存済みの測定だけを使う再集計は、モデルをロードせずに行える。[評価の続行・訂正・再集計](09_evaluator.md#評価の続行訂正再集計)
 
@@ -81,7 +85,7 @@ XOR CSV の版を変えるときは新しい SHA-256 を指定する。新しい
 
 状態を確認できない間は、最後に確認した状態を返し、`state_confirmed` を `false` とする。確認できる場合は `true` とする。失敗時の `error` には、エラーコードと原因を含める。[実行状態とプロセス管理](03_execution_state_and_processes.md)
 
-読み取り専用のExperimentでは、`status` はその時点の観測を返す。`reconcile=True` を指定すると、受付・実行中の実行について、実行ホストの起動・終了情報と記録済みの処理結果を照合し、状態遷移表に従って確認できた遷移をDBに記録する。起動や終了の有無を確認できない間は枝の占有を維持する。CLIの `status` と `wait` はこの動作を使う。実行中の `execution_host` は状態を確認するためのホスト名を示す。
+読み取り専用の Experiment では、`status` はその時点の観測を返す。書き込み可能な Experiment で `reconcile=True` を指定すると、受付・実行中の実行について、実行ホストの起動・終了情報と記録済みの処理結果を照合し、状態遷移表に従って確認できた遷移をDBに記録する。起動や終了の有無を確認できない間は枝の占有を維持する。CLIの `status` と `wait` はこの動作を使う。実行中の `execution_host` は状態を確認するためのホスト名を示す。
 
 `history` は `branches`、`runs`、`events`、`artifacts` を返す。実行IDを指定した場合は、その実行、所属する枝、関連するイベントと成果物を返す。`artifacts` の各保存点には `checkpoint_state` があり、`retained`、`deleting`、`deleted` のいずれかを返す。コピー中に削除依頼へ `in_use` を返した保存点は `retained` のままである。削除後も同じIDから過去の進捗、評価結果、使用履歴をたどれる。分岐元や別の実行の成果物は、その参照を通じてたどれる。指標、評価結果、生成されたログはイベントに含まれる。[履歴と成果物](../20_basic_design/02_history_and_artifacts.md)
 
@@ -108,7 +112,7 @@ XORの学習実行 `R1` を更新120で中断し、同じ枝の `R2` で学習�
 
 `verify()` は保存済みの記録と成果物を読み取り、プロジェクト全体で各実行の由来と保持する成果物の内容を検証する。検証件数に加え、見つかった不整合をすべて `issues` に返す。各項目には対象を特定する実行IDや成果物IDと理由を含める。たとえば、ある実行の保存点の欠落と別の実行の予測ファイルの破損は同じ応答で確認できる。
 
-既存の保存点を使った場合は、実行履歴に記録した成果物IDから元の保存点の記録と生成元の実行をたどれることを確認する。開始状態の検証には、保存完了と学習・評価の開始の記録を使う。予測結果を入力にした評価では、入力に使った予測結果を同じ規則で照合する。[保存点と実行開始状態](04_checkpoint_management.md)
+既存の保存点を使った場合は、実行履歴に記録した成果物IDから元の保存点の記録と生成元の実行をたどれることを確認する。以下は、モデル・学習の開始状態または入力予測の実体を保存する実行について、保存完了と学習・評価の開始の記録を照合する規則である。保存済み測定だけを使った再集計の入力は、集計 ID から元の評価と採用した結果をたどる。 [保存点と実行開始状態](04_checkpoint_management.md)・[集計値と入力](10_evaluation_history_api.md#集計値と入力をたどる)
 
 | 実行履歴 | 開始状態の判定 |
 |---|---|

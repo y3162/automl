@@ -6,13 +6,13 @@ Experimentが個別実装を読み込み、実行に使う設定を確定する�
 
 設定に、使用する個別実装への参照と、その実装に渡す設定を書く。Experimentは指定された参照から実装を直接インポートし、使用する版と公開APIの契約への適合を確認する。設定項目、既定値、許容される値は個別実装が定める。
 
-たとえば `src/project_xor.py` に `Model` を実装する `WiderMLP` を置いた場合、子configの `components.model.implementation` に `project_xor.WiderMLP` を指定する。Trainer・Evaluatorが求める操作を提供していれば、同じ学習・評価手順で利用できる。Trainer・Evaluatorの個別実装からは、`automl.experiment` の `Components` で設定された部品を構築し、`RunContext` を通じてログや保存点を渡せる。
+たとえば `src/methods/baseline_mlp/model.py` に `Model` を実装する `MLP` を置いた場合、子configの `components.model.implementation` に `methods.baseline_mlp.model.MLP` を指定する。Trainer・Evaluatorが求める操作を提供していれば、同じ学習・評価手順で利用できる。Trainer・Evaluatorの個別実装からは、`automl.experiment` の `Components` で設定された部品を構築し、`RunContext` を通じてログや保存点を渡せる。
 
 ## 実装者による版管理
 
 実装者は、過去の実行で指定した版を後から選んでも、当時の処理を呼び出せるように管理する。版ごとにディレクトリやファイルを分ける方法、同じ実装で版を引数として受け取る方法など、区別の仕方は実装者が選ぶ。Experimentは実装の参照と版を選ぶために使った設定を実行履歴に残す。
 
-このルールは、処理に影響する補助ファイルにも適用する。たとえば共通の正規化処理を変更する場合、新しい版から変更後の処理を呼び、既存の版からは従来の処理を呼べるようにする。
+この契約は、別の版から import した補助モジュールにも適用する。たとえば新版で正規化を変える場合、新版から変更後の処理を呼び、旧版を選ぶ設定では従来の計算を使えるようにする。過去の実行そのものを再現するときは、確定設定と、その実行の受付時に固定したソースを使う。 [手法の配置と実装の版管理](../90_operations_and_maintenance/03_source_layout_and_versions.md)
 
 ## 設定の継承
 
