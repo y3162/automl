@@ -1,0 +1,9 @@
+extends: configs/examples/mnist/classifier/evaluate.yaml
+plan: [train, evaluate]
+components:
+  trainer:
+    implementation: examples.mnist.classifier.trainer.MiniBatchSGD
+    settings: {epochs: 2, limit: 256, batch_size: 32, learning_rate: 0.25, seed: 17, selection_metric: accuracy}
+  validation:
+    implementation: examples.mnist.classifier.evaluation.Accuracy
+    settings: {split: validation, limit: 32}

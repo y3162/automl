@@ -73,8 +73,9 @@ class FullBatch(Trainer):
             raise ValueError("invalid completed round count in XOR training checkpoint")
         if type(progress.get("rounds")) is not int or progress["rounds"] != completed:
             raise ValueError("checkpoint progress does not match the completed round count")
-        target_status = training_state.get("target_status")
-        if target_status is not None and (self.target_score is None or target_status not in ("pending", "reached")):
+        validation_status = training_state.get("target_status")
+        if (validation_status not in (None, "pending", "reached")
+                or (validation_status == "reached" and self.target_score is None)):
             raise ValueError("invalid target score status in XOR training checkpoint")
         try:
             np.random.default_rng(self.seed).bit_generator.state = training_state["rng"]
@@ -132,21 +133,21 @@ class FullBatch(Trainer):
         model = context.prepare_model(components)
         rng = np.random.default_rng(self.seed)
         completed = 0
-        target_status = None
+        validation_status = None
         if start_method == "resume":
             initial = context.initial_states()
             state = initial["training"]
             self.validate_resume(state, initial["progress"])
             completed = state["rounds"]
             rng.bit_generator.state = state["rng"]
-            target_status = state.get("target_status")
+            validation_status = state.get("target_status")
         elif start_method != "new":
             raise ValueError(f"unknown XOR training start method {start_method!r}")
 
         def training_state():
             state = {"rounds": completed, "rng": rng.bit_generator.state}
-            if target_status is not None:
-                state["target_status"] = target_status
+            if validation_status is not None:
+                state["target_status"] = validation_status
             return state
 
         position = 0
@@ -158,25 +159,25 @@ class FullBatch(Trainer):
                                            score=score, metric=metric, reuse_identical=True)
 
         def validated_checkpoint():
-            nonlocal score, metric, target_status
-            if self.target_score is not None and target_status != "reached":
-                # If evaluation is interrupted, resume this decision before another update.
-                target_status = "pending"
+            nonlocal score, metric, validation_status
+            if "validation" in components and validation_status != "reached":
+                # A scheduled score can select the best checkpoint even without an early-stop target.
+                validation_status = "pending"
             score, metric = self._validate(components, context, model, completed)
-            if target_status == "pending":
-                reached = score is not None and (
+            if validation_status == "pending":
+                reached = self.target_score is not None and score is not None and (
                     score <= self.target_score if self.minimize else score >= self.target_score
                 )
-                target_status = "reached" if reached else None
+                validation_status = "reached" if reached else None
             return checkpoint()
 
         context.log("dataset_split", component="dataset", version=version, split="train")
         context.start_training(model_state=model.state_dict(), training_state=training_state(),
                                progress={"rounds": completed})
         try:
-            if target_status == "pending":
+            if validation_status == "pending":
                 latest = validated_checkpoint()
-            while completed < self.rounds and target_status != "reached":
+            while completed < self.rounds and validation_status != "reached":
                 if context.stop_requested():
                     raise Interrupted("XOR training stopped at a round boundary")
                 position, loss = self._train_round(context, model, transform, version, features, labels,
@@ -201,7 +202,7 @@ class FullBatch(Trainer):
         if self.final_checkpoint == "best":
             best = context.best_checkpoint(direction="min" if self.minimize else "max")
             selected = best[0] if best else None
-        reason = "target_score_reached" if target_status == "reached" else "round_limit"
+        reason = "target_score_reached" if validation_status == "reached" else "round_limit"
         result = {"checkpoint": selected, "selection": self.final_checkpoint, "rounds": completed,
                   "usage_range": position, "reason": reason}
         if selected is None:

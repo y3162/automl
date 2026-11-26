@@ -1,0 +1,6 @@
+extends: configs/examples/mnist/gan/train.yaml
+components:
+  trainer:
+    settings: {steps: 384, rate: 0.2, save_every: 96}
+  evaluator:
+    settings: {count: 64}

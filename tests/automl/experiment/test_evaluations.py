@@ -101,6 +101,24 @@ def test_pages_keep_scope_state_and_boundary_after_copy(journal):
     assert invalid.value.code == "invalid_request"
 
 
+def test_evaluation_versions_include_only_opens_visible_at_the_cursor(journal):
+    history, run, _ = journal
+    conditions = {"versions": {"reference": "pinned"}}
+    first, _ = history.begin_evaluation(run, "C1", conditions)
+    second, _ = history.begin_evaluation(run, "C2", conditions, request_id="score")
+    history.log_evaluation(run, first, "dataset_opened", component="first_only", version="v1")
+    cursor = history.list_evaluations(run, limit=1)["next_cursor"]
+    history.log_evaluation(run, second, "dataset_opened", component="dataset", version="v2")
+    history.finish_evaluation(run, second, "succeeded", complete=True)
+
+    frozen, = history.list_evaluations(run, limit=1, cursor=cursor)["evaluations"]
+    assert frozen["conditions"] == conditions
+    assert history.get_evaluation(run, second)["conditions"]["versions"] == {
+        "reference": "pinned", "dataset": "v2",
+    }
+    assert history.begin_evaluation(run, "C2", conditions, request_id="score") == (second, False)
+
+
 def test_cross_run_sources_and_direct_uses(journal):
     history, original_run, _ = journal
     old, _ = history.begin_evaluation(original_run, "C1", {})

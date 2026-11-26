@@ -1,0 +1,12 @@
+plan: [evaluate]
+components:
+  dataset:
+    implementation: examples.mnist.data.MnistDataset
+  transform:
+    implementation: examples.mnist.classifier.model.FlattenImages
+  model:
+    implementation: examples.mnist.classifier.model.SoftmaxClassifier
+    settings: {seed: 7}
+  evaluator:
+    implementation: examples.mnist.classifier.evaluation.Accuracy
+    settings: {split: test, limit: 64, save_predictions: true}

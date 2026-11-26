@@ -1,0 +1,11 @@
+extends: configs/examples/mnist/classifier/train.yaml
+components:
+  model:
+    implementation: examples.mnist.classifier.model.MLPClassifier
+    settings: {width: 128, seed: 7}
+  trainer:
+    settings: {epochs: 6, limit: 2048}
+  validation:
+    settings: {limit: 128}
+  evaluator:
+    settings: {limit: null}

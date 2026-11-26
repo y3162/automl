@@ -1,0 +1,34 @@
+plan: [train, evaluate]
+components:
+  dataset:
+    implementation: examples.mnist.data.MnistDataset
+  generator:
+    implementation: examples.mnist.gan.model.Generator
+    settings:
+      latent_dim: 16
+      seed: 1
+  discriminator:
+    implementation: examples.mnist.gan.model.Discriminator
+    settings:
+      seed: 2
+  trainer:
+    implementation: examples.mnist.gan.experiment.AdversarialTrainer
+    settings:
+      steps: 24
+      train_limit: 512
+      batch_size: 32
+      rate: 0.05
+      seed: 3
+      save_every: 8
+  validation:
+    implementation: examples.mnist.gan.experiment.AdversarialEvaluation
+    settings:
+      split: validation
+      count: 16
+      seed: 11
+  evaluator:
+    implementation: examples.mnist.gan.experiment.AdversarialEvaluation
+    settings:
+      split: test
+      count: 16
+      seed: 12

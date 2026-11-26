@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS evaluations (
     UNIQUE (run_id, request_id)
 );
 CREATE INDEX IF NOT EXISTS eval_by_run ON evaluations(run_id, started);
+CREATE INDEX IF NOT EXISTS eval_logs_by_run ON events(run_id, id) WHERE kind='evaluation_log';
 CREATE TABLE IF NOT EXISTS evaluation_sources (
     source_run TEXT NOT NULL,
     source_eval TEXT NOT NULL,
@@ -152,7 +153,14 @@ def _page(db, scope, limit, cursor, sql, params, key, unpack, *, initial_positio
 
 
 _EVAL_SELECT = """
-    SELECT v.started AS pos, s.payload AS started, f.payload AS finished, m.payload AS measured_model
+    SELECT v.started AS pos, s.payload AS started, f.payload AS finished, m.payload AS measured_model,
+        (SELECT json_group_object(json_extract(l.payload, '$.component'), json_extract(l.payload, '$.version'))
+         FROM events l WHERE l.run_id=v.run_id AND l.kind='evaluation_log'
+           AND l.id BETWEEN v.started AND min(coalesce(v.finished, :until), :until)
+           AND json_extract(l.payload, '$.evaluation_id')=v.evaluation_id
+           AND json_extract(l.payload, '$.message')='dataset_opened'
+           AND json_type(l.payload, '$.component')='text'
+           AND json_type(l.payload, '$.version')='text') AS opened_versions
     FROM evaluations v
     JOIN events s ON s.id=v.started
     LEFT JOIN events f ON f.id=v.finished AND f.id<=:until
@@ -167,6 +175,11 @@ def _describe(row):
     end = json.loads(row["finished"]) if row["finished"] is not None else {}
     if row["measured_model"] is not None:
         start["target"]["model_sha256"] = json.loads(row["measured_model"])["model_sha256"]
+    # The request contains the versions pinned at acceptance. An evaluator can
+    # also open a dataset whose version is first assigned during this run.
+    conditions = start["conditions"]
+    if isinstance(conditions, dict) and isinstance(conditions.get("versions"), dict):
+        conditions["versions"].update(json.loads(row["opened_versions"]))
     return {
         "run_id": start["run_id"], "evaluation_id": start["evaluation_id"],
         "target": start["target"], "conditions": start["conditions"],

@@ -134,6 +134,19 @@ def test_resume_interrupted_target_validation_before_updating():
     assert result["rounds"] == 2 and not resumed.batches
 
 
+def test_resume_repeats_interrupted_validation_without_a_target_score():
+    trainer = FullBatch(rounds=4, save_every=2)
+    interrupted = ValidationContext([Interrupted("stop during validation")])
+    with pytest.raises(Interrupted):
+        trainer.train({"validation": True}, interrupted, start_method="new")
+    resumed = ValidationContext([1.0, 0.75], initial=interrupted.latest)
+    trainer.train({"validation": True}, resumed, start_method="resume")
+
+    assert resumed.validated == [2, 4]
+    assert len(resumed.batches) == 2
+    assert resumed.latest["score"] == 0.75
+
+
 @pytest.mark.parametrize("value", [True, "1", float("inf"), float("nan")])
 def test_target_score_requires_a_finite_number(value, tmp_path):
     with pytest.raises(ValueError, match="target_score"):
