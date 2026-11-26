@@ -75,7 +75,7 @@ class TrainingContext:
                 state = next(iter(models.values()))
             else:
                 raise ValueError(f'Checkpoint contains no state for model {name!r}')
-            retain = (self.record.get('retain') or None) if mode == 'initialize' else None
+            retain = self.record.get('retain') if mode == 'initialize' else None
             model = components.create(name, Model, mode=mode, state=state, retain=retain)
             if model.initialization_report is not None:
                 self.log('model_initialized', component=name, **model.initialization_report)

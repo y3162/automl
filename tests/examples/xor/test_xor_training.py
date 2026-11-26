@@ -3,7 +3,7 @@ import pytest
 
 from automl.experiment.runtime import Interrupted
 from examples.xor.components.data import InlineVersion
-from examples.xor.components.learning import MiniBatch
+from examples.xor.components.learning import FullBatch, MiniBatch
 from examples.xor.components.model import TinyMLP
 
 
@@ -84,3 +84,57 @@ def test_resumed_minibatches_match_uninterrupted_order_rng_and_weights():
         trainer.validate_resume(resumed.latest["training_state"], {"rounds": 0})
     with pytest.raises(ValueError, match="shuffle generator"):
         trainer.validate_resume({"rounds": 1, "rng": {}}, {"rounds": 1})
+
+
+class ValidationContext(RoundBoundaryContext):
+    def __init__(self, scores, **kwargs):
+        super().__init__(**kwargs)
+        self.scores = iter(scores)
+        self.validated = []
+
+    def evaluate(self, components, model, *, component, progress):
+        self.validated.append(progress["rounds"])
+        self.last_evaluation = f"validation-{progress['rounds']}"
+        score = next(self.scores)
+        if isinstance(score, Interrupted):
+            raise score
+        return {"complete": score is not None, "accuracy": score, "error_rate": score}
+
+
+@pytest.mark.parametrize("trainer_type,metric,minimize,target,miss", [
+    (FullBatch, "accuracy", False, 1.0, 0.75),
+    (MiniBatch, "error_rate", True, 0.0, 0.25),
+])
+def test_target_score_stops_at_a_complete_validation(trainer_type, metric, minimize, target, miss):
+    trainer = trainer_type(rounds=8, save_every=2, selection_metric=metric,
+                           minimize=minimize, target_score=target)
+    context = ValidationContext([None, miss, target])
+    result = trainer.train({"validation": True}, context, start_method="new")
+    assert (result["rounds"], result["reason"], result["checkpoint"]) == (6, "target_score_reached", "6")
+    assert context.validated == [2, 4, 6]
+    assert context.latest["score"] == target
+    assert context.latest["metric"]["evaluation_id"] == "validation-6"
+
+    resumed = ValidationContext([target], initial=context.latest)
+    result = trainer.train({"validation": True}, resumed, start_method="resume")
+    assert (result["rounds"], result["reason"], result["usage_range"]) == (6, "target_score_reached", 0)
+    assert resumed.batches == []
+    assert resumed.latest["model_state"] == context.latest["model_state"]
+
+
+def test_resume_interrupted_target_validation_before_updating():
+    trainer = FullBatch(rounds=8, save_every=2, target_score=1.0)
+    interrupted = ValidationContext([Interrupted("stop during validation")])
+    with pytest.raises(Interrupted):
+        trainer.train({"validation": True}, interrupted, start_method="new")
+    resumed = ValidationContext([1.0], initial=interrupted.latest)
+    result = trainer.train({"validation": True}, resumed, start_method="resume")
+    assert resumed.validated == [2]
+    assert result["reason"] == "target_score_reached"
+    assert result["rounds"] == 2 and not resumed.batches
+
+
+@pytest.mark.parametrize("value", [True, "1", float("inf"), float("nan")])
+def test_target_score_requires_a_finite_number(value, tmp_path):
+    with pytest.raises(ValueError, match="target_score"):
+        FullBatch.resolve_settings({"target_score": value}, tmp_path)

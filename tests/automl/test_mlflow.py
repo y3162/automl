@@ -3,7 +3,27 @@ import shutil
 import pytest
 
 from automl.experiment import Experiment
-from automl.mlflow import sync
+from automl.mlflow import main, sync
+
+
+def test_default_tracker_is_isolated_per_mock_store(tmp_path, monkeypatch):
+    mlflow = pytest.importorskip("mlflow")
+    pytest.importorskip("sqlalchemy")
+    monkeypatch.chdir(tmp_path)
+    mock = tmp_path / "data" / "mock"
+    stores = [Experiment(mock / "store" / case).store for case in ("baseline", "candidate")]
+    for store in stores:
+        main(["--root", str(store.root)])
+
+    for store in stores:
+        work = mock / "work" / store.root.name / "mlflow"
+        assert (work / "tracking.db").is_file()
+        assert (work / f"{store.project_id}.lock").is_file()
+        client = mlflow.MlflowClient(tracking_uri=f"sqlite:///{work}/tracking.db")
+        experiment = client.get_experiment_by_name("AutoML")
+        assert experiment.tags["automl.project_id"] == store.project_id
+        assert experiment.artifact_location == (work / "artifacts").as_uri()
+    assert not (mock / "store" / "work").exists()
 
 
 def test_export_retry_and_projection_rebuild(tmp_path, monkeypatch):

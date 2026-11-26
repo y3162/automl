@@ -11,6 +11,8 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from automl.paths import work_directory
+
 
 _TERMINAL = {"succeeded": "FINISHED", "failed": "FAILED", "interrupted": "KILLED"}
 
@@ -118,6 +120,10 @@ def _publish(client, mlrun, history, confirmed):
         raise
 
 
+def _tracking_directory(root: Path) -> Path:
+    return work_directory(root, fallback=root.parent / "work") / "mlflow"
+
+
 def sync(experiment, client, *, experiment_name="AutoML", artifact_location=None):
     """Sync one project's revisions and return the AutoML-to-MLflow run-ID mapping.
 
@@ -126,7 +132,7 @@ def sync(experiment, client, *, experiment_name="AutoML", artifact_location=None
     """
     store = experiment.store
     project_id = store.project_id
-    work = store.root.parent / "work" / "mlflow"
+    work = _tracking_directory(store.root)
     work.mkdir(parents=True, exist_ok=True)
     with (work / f"{project_id}.lock").open("a+b") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -174,7 +180,7 @@ def main(argv=None):
         parser.error("install the mlflow optional dependency to export tracking data")
     from automl.experiment import Experiment
 
-    work = args.root.resolve().parent / "work" / "mlflow"
+    work = _tracking_directory(args.root.resolve())
     work.mkdir(parents=True, exist_ok=True)
     client = MlflowClient(tracking_uri=args.tracking_uri or f"sqlite:///{work}/tracking.db")
     artifacts = (work / "artifacts").as_uri() if args.tracking_uri is None else None

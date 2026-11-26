@@ -16,6 +16,7 @@ from typing import Any, BinaryIO
 import numpy as np
 
 from automl.dataset import DatasetVersion, Sample
+from automl.paths import work_directory
 from automl.transform import Transform, TransformResult
 from .catalog import CatalogDataset, check_digest, connect, json_bytes, store_path
 
@@ -60,12 +61,7 @@ def _scan(path: Path) -> tuple[str, list[tuple[str, str, int]]]:
 
 
 def _index_path(root: Path) -> Path:
-    # The designed layouts are data/store and data/mock/store/<test>.
-    for parent in (root, *root.parents):
-        if parent.name == "store":
-            return parent.parent / "work" / root.relative_to(parent) / "xor" / "index.sqlite3"
-    # Keep custom/temporary data roots isolated just as their authoritative records are.
-    return root / "work" / "xor" / "index.sqlite3"
+    return work_directory(root, fallback=root / "work") / "xor" / "index.sqlite3"
 
 
 class CsvVersion(DatasetVersion):

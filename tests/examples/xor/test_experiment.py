@@ -84,6 +84,30 @@ def test_cancel_before_launch_then_retry_training(workspace):
     assert exp.verify()["issues"] == []
 
 
+def test_fork_with_empty_retain_trains_the_csv_product_model_from_scratch(workspace):
+    root, source = workspace
+    (source / "one-round.yaml").write_text(yaml.safe_dump({
+        "extends": "configs/examples/xor/train.yaml",
+        "components": {"trainer": {"settings": {"rounds": 1}}},
+    }))
+    exp = Experiment(root, source=source)
+    parent = exp.start(exp.branch(), "one-round.yaml")
+    assert wait(exp, parent)["status"] == "succeeded"
+
+    child = exp.start(config="configs/examples/xor/product_target.yaml", fork=parent, retain=[])["run_id"]
+    status = wait(exp, child)
+    assert status["status"] == "succeeded", status["stage_reasons"]
+    assert status["origin_run"] == parent
+    assert status["stage_reasons"]["train"] == "target_score_reached"
+    history = exp.history(child)
+    initialized, = (e["payload"] for e in history["events"] if e["kind"] == "model_initialized")
+    assert initialized["retained"] == []
+    assert initialized["initialized"] == ["bias", "weight"]
+    checkpoint, = (a for a in history["artifacts"] if a["kind"] == "checkpoint")
+    assert checkpoint["order"] == 1 and checkpoint["details"]["score"] == 1.0
+    assert exp.verify(child)["ready"]
+
+
 def test_stop_then_resume_from_the_saved_training_state(workspace):
     root, source = workspace
     # Gate only the first training process after a durable checkpoint. This

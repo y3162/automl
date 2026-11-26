@@ -21,6 +21,8 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from automl.paths import work_directory
+
 from .errors import ExperimentError
 
 
@@ -146,13 +148,7 @@ def _archive_files(bundle: zipfile.ZipFile):
 
 
 def _work_directory(root: Path) -> Path:
-    # data/store and data/mock/store/<case> each have a sibling work area.
-    if root.name == "store":
-        return root.parent / "work" / "automl-source"
-    for parent in root.parents:
-        if parent.name == "store":
-            return parent.parent / "work" / root.relative_to(parent) / "automl-source"
-    return root.parent / "work" / root.name / "automl-source"
+    return work_directory(root, fallback=root.parent / "work" / root.name) / "automl-source"
 
 
 def _matches(directory: Path, bundle: zipfile.ZipFile, entries: list[zipfile.ZipInfo]) -> bool:
