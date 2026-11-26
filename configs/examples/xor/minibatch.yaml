@@ -1,0 +1,9 @@
+extends: configs/examples/xor/full_batch.yaml
+components:
+  trainer:
+    implementation: examples.xor.components.learning.MiniBatch
+    settings:
+      rounds: 20
+      rate: 0.35
+      batch_size: 32
+      save_every: 5

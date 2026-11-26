@@ -1,0 +1,30 @@
+plan: [train, evaluate]
+components:
+  dataset:
+    implementation: examples.xor.components.data.CsvDataset
+    settings:
+      path: configs/examples/xor/samples.csv
+  transform:
+    implementation: examples.xor.components.data.ScaleFeatures
+    settings:
+      scale: 0.5
+  model:
+    implementation: examples.xor.components.model.TinyMLP
+    settings:
+      width: 8
+      seed: 7
+  trainer:
+    implementation: examples.xor.components.learning.FullBatch
+    settings:
+      rounds: 100
+      rate: 0.8
+      save_every: 25
+  validation:
+    implementation: examples.xor.components.scoring.Accuracy
+    settings:
+      split: validation
+  evaluator:
+    implementation: examples.xor.components.scoring.Accuracy
+    settings:
+      split: test
+      on_error: continue

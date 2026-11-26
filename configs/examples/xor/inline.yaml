@@ -1,0 +1,30 @@
+extends: configs/examples/xor/full_batch.yaml
+components:
+  dataset:
+    implementation: examples.xor.components.data.InlineDataset
+    settings:
+      splits:
+        train: [[1, 1, 0], [1, -1, 1], [-1, 1, 1], [-1, -1, 0]]
+        validation: [[0.9, 1, 0], [1, -0.9, 1], [-0.9, 1, 1], [-1, -0.9, 0]]
+        test: [[1.1, 1, 0], [1, -1.1, 1], [-1.1, 1, 1], [-1, -1.1, 0]]
+  transform:
+    implementation: automl.transform.Identity
+  model:
+    implementation: examples.xor.components.model.ProductLogistic
+  trainer:
+    implementation: examples.xor.components.learning.MiniBatch
+    settings:
+      rounds: 12
+      rate: 0.4
+      batch_size: 2
+      save_every: 4
+      selection_metric: error_rate
+      minimize: true
+  validation:
+    implementation: examples.xor.components.scoring.ErrorRate
+    settings:
+      split: validation
+  evaluator:
+    implementation: examples.xor.components.scoring.ErrorRate
+    settings:
+      split: test
