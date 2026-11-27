@@ -13,19 +13,22 @@ scripts/setup_speech_v0.sh
 source .venvs/speech-v0/bin/activate
 ```
 
-このワークスペースでは、参照環境の Mamba 2.3.2.post1 から Mamba-1 の演算を、causal-conv1d 1.7.0 から因果畳み込みを取り込み、コンパイル済みの CUDA 拡張と一緒に `.venvs/speech-v0` にインストールする。学習時の依存先はこの仮想環境内で完結する。他の場所にある同じ参照環境を使うときは `SPEECH_REFERENCE_PYTHON` に Python のパスを指定する。参照環境がない場合は Mamba 2.3.1 と causal-conv1d 1.7.0 の公式 CUDA ホイールを使う。その場合はホイールに対応する新しい glibc が必要になる。
+`.venvs/speech-v0/native-wheels/` に準備済みのホイールがあれば再利用する。初回の既定は Mamba 2.3.1 と causal-conv1d 1.7.0 の公式 CUDA ホイールで、対応する glibc が必要になる。ローカルでビルド済みの Mamba 2.3.2.post1 と causal-conv1d 1.7.0 を使う場合は、その環境の Python を `SPEECH_REFERENCE_PYTHON` に明示してホイールを作成する。
 
-A0〜A7 は参照実装の VoiceBank −15 dB 条件を使う。既存のスナップショットから、発話順、切り出し位置、音量係数、原音の SHA-256、正解テキストを含むマニフェストを準備する。`--corpora` には VCTK、DEMAND48、Babble、SSN の親ディレクトリを渡す。このワークスペースでの準備コマンドは次の通り。
+A0〜A7 は VoiceBank の各発話の SNR を 15 dB 下げて使う。発話順、学習・テスト分割、音声と雑音のファイル名・SHA-256・チャンネル・サンプル区間、ゲイン、正解テキストは Git 管理の JSONL に固定してある。シフト量は同じレシピに対して準備時に指定する。[VoiceBank+DEMAND SNR shift v1 レシピ](../../../recipes/voicebank_demand_snr_shift_v1.jsonl)
+
+`.env` の `CORPUS_VCTK` には VCTK 0.80 の展開先を、`CORPUS_DEMAND48`、`CORPUS_BABBLE`、`CORPUS_SSN` にはそれぞれの雑音コーパスの展開先を設定する。プロジェクトルートで初回にコーパスリンクを `data/corpora/` に作り、続いて −15 dB のマニフェストを作る。
 
 ```sh
-python -m methods.asr_guided_se.v1.data \
-  --snapshot ../audio-db/data/db/snapshots/820178d409919018fdc24e5d3d3e32e2c6d4d181ea11969068fe2917be791250 \
-  --corpora /net/spring/work/seki/database
+make setup-data VENV=.venvs/speech-v0
+python -m methods.asr_guided_se.v1.data --snr-shift-db -15
 ```
 
 学習はローカルのマニフェストと原音を使う。48 kHz で浮動小数点のペアを再構成し、16 kHz に変換してから両方を noisy 音声のピークで正規化する。訓練は28話者の11,572発話、保存点の選択は参照実験と同じ公式テスト824発話のコーパス WER を使う。この WER は選択に使ったデータ上の値となる。
 
-−10 dB スナップショットにも同じ準備コマンドが使える。出力した `voicebank_m10db.jsonl` を `components.dataset.settings.manifest` に指定する。配布 WAV のペアを使う場合は `.env` の `CORPUS_VOICEBANK_DEMAND` を設定し、次のコマンドで索引とマニフェストを作る。この場合の `manifest` は `data/work/asr_guided_se/voicebank28.jsonl`、`corpus` は `data/corpora/voicebank_demand` とする。
+出力先は `data/work/asr_guided_se/voicebank_m15db.jsonl`。−10 dB なら同じコマンドに `--snr-shift-db -10` を渡し、実験 YAML の `components.dataset.settings.manifest` に `data/work/asr_guided_se/voicebank_m10db.jsonl` を指定する。
+
+配布 WAV のペアを使う場合は `.env` の `CORPUS_VOICEBANK_DEMAND` を設定し、次のコマンドで索引とマニフェストを作る。この場合の `manifest` は `data/work/asr_guided_se/voicebank28.jsonl`、`corpus` は `data/corpora/voicebank_demand` とする。
 
 ```sh
 make setup-data VENV=.venvs/speech-v0 CORPUS=voicebank_demand

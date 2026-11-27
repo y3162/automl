@@ -6,7 +6,7 @@ venv=.venvs/speech-v0
 if [[ ! -x "$venv/bin/python" ]]; then
     uv venv --python 3.12 "$venv"
 fi
-reference=${SPEECH_REFERENCE_PYTHON:-../audio-db/.venvs/asr_guided_se/bin/python}
+reference=${SPEECH_REFERENCE_PYTHON:-}
 wheel_dir="$venv/native-wheels"
 tag=cp312-cp312-linux_x86_64.whl
 mamba="$wheel_dir/mamba_ssm-2.3.2.post1+mamba1-$tag"

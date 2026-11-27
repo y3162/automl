@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -16,15 +17,15 @@ import torch
 from torchaudio.functional import resample
 
 from automl.dataset import DatasetVersion, Sample
-from automl.paths import installed_corpus_link
 from corpora.index import INDEX
 from examples.xor.components.catalog import CatalogDataset, check_digest, store_path
 
 from .random import mix_seed
-from .voicebank_snapshot import render_pair, snapshot_rows, source_path
+from .voicebank_recipe import render_pair, source_path, source_roots
 
 CORPUS = "data/corpora/voicebank_demand"
 MANIFEST = "data/work/asr_guided_se/voicebank28.jsonl"
+SNR_RECIPE = Path("recipes/voicebank_demand_snr_shift_v1.jsonl")
 
 
 def _digest(path):
@@ -54,12 +55,29 @@ def prepare_manifest(root):
         return _write_manifest(root / MANIFEST, pool.map(record, rows))
 
 
+def prepare_snr_manifest(root, shift_db, recipe=SNR_RECIPE):
+    if not math.isfinite(shift_db):
+        raise ValueError("SNR shift must be finite")
+    if shift_db == int(shift_db):
+        shift_db = int(shift_db)
+    label = f"m{abs(shift_db)}" if shift_db < 0 else str(shift_db)
+    path = root / "data/work/asr_guided_se" / f"voicebank_{label}db.jsonl"
+    with (root / recipe).open(encoding="utf-8") as stream:
+        rows = (
+            json.dumps(row | {"snr_shift_db": shift_db}, sort_keys=True)
+            for row in map(json.loads, stream)
+        )
+        return _write_manifest(path, rows)
+
+
 def _write_manifest(path, lines):
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(mode="w", dir=path.parent, encoding="utf-8", delete=False) as tmp:
         try:
             for line in lines:
                 tmp.write(line + "\n")
+            if not tmp.tell():
+                raise ValueError("The VoiceBank manifest has no samples")
             tmp.flush()
             os.replace(tmp.name, path)
         finally:
@@ -79,6 +97,7 @@ def _manifest(root, path, digest):
 class PairVersion(DatasetVersion):
     def __init__(self, manifest, corpus):
         self.corpus = corpus
+        self.source_roots = source_roots(corpus)
         self.rows = {}
         self._verified = {}
         with manifest.open(encoding="utf-8") as stream:
@@ -113,7 +132,7 @@ class PairVersion(DatasetVersion):
     def get_sample(self, sample_id):
         row = self.rows[sample_id]
         if "sources" in row:
-            clean, noisy = render_pair(self.corpus, row, self.verify_asset)
+            clean, noisy = render_pair(self.source_roots, row, self.verify_asset)
         else:
             clean, noisy = self._audio(row, "clean"), self._audio(row, "noisy")
         if clean.shape != noisy.shape:
@@ -136,7 +155,7 @@ class VoiceBankPairs(CatalogDataset):
         expected = settings.get("sha256")
         path = _manifest(root, manifest, expected)
         if not path.is_file():
-            raise ValueError(f"Missing {path}. Prepare the VoiceBank pair manifest with python -m methods.asr_guided_se.v1.data")
+            raise ValueError(f"Missing {path}. See python -m methods.asr_guided_se.v1.data --help for preparation options")
         digest = _digest(path)
         if expected is not None and expected != digest:
             raise ValueError("Audio manifest checksum mismatch")
@@ -154,7 +173,7 @@ class VoiceBankPairs(CatalogDataset):
     def __init__(self, root, manifest, corpus, sha256):
         self.root = root
         self.manifest = manifest
-        self.corpus = (root / corpus).resolve()
+        self.corpus = (root / corpus).absolute()
         super().__init__(store_path(root) / "datasets/asr_guided_se/catalog.sqlite3", sha256)
         # Direct Dataset API callers also retain the immutable manifest.
         dest = store_path(root) / "inputs" / sha256
@@ -181,7 +200,7 @@ class VoiceBankPairs(CatalogDataset):
         for row in version.rows.values():
             if "sources" in row:
                 for source in row["sources"].values():
-                    version.verify_asset(source_path(version.corpus, source), source["sha256"])
+                    version.verify_asset(source_path(version.source_roots, source), source["sha256"])
             else:
                 for field in ("clean", "noisy"):
                     version.verify_asset(version.corpus / row[field], row[field + "_sha256"])
@@ -215,21 +234,14 @@ def crop_batch(samples, window, seed, epoch, device):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Freeze the indexed VoiceBank 28-speaker WAV pairs and transcripts.")
+    parser = argparse.ArgumentParser(description="Prepare VoiceBank 28-speaker WAV pairs or an SNR-shift manifest.")
     parser.add_argument("--root", type=Path, default=Path.cwd())
-    parser.add_argument("--snapshot", type=Path, help="audio-db VoiceBank SNR-shift snapshot directory")
-    parser.add_argument("--corpora", type=Path, help="parent of VCTK, Babble, SSN and DEMAND48")
+    parser.add_argument("--snr-shift-db", type=float, help="add this shift in dB to each utterance's original SNR")
+    parser.add_argument("--recipe", type=Path, help=f"SNR-shift recipe JSONL, relative to --root (default: {SNR_RECIPE})")
     args = parser.parse_args()
-    if args.snapshot is None and args.corpora is None:
-        print(prepare_manifest(args.root))
-    elif args.snapshot is not None and args.corpora is not None:
-        rows = list(snapshot_rows(args.snapshot, args.corpora))
-        shift = rows[0]["snr_shift_db"]
-        shift_name = f"{shift:g}".replace("-", "m")
-        path = args.root / "data/work/asr_guided_se" / f"voicebank_{shift_name}db.jsonl"
-        link = args.root / "data/corpora/asr_guided_se_sources"
-        link.parent.mkdir(parents=True, exist_ok=True)
-        with installed_corpus_link(link, args.corpora.resolve(strict=True)):
-            print(_write_manifest(path, (json.dumps(row, sort_keys=True) for row in rows)))
+    if args.snr_shift_db is not None:
+        print(prepare_snr_manifest(args.root, args.snr_shift_db, args.recipe or SNR_RECIPE))
+    elif args.recipe is not None:
+        parser.error("--recipe requires --snr-shift-db")
     else:
-        parser.error("--snapshot and --corpora must be provided together")
+        print(prepare_manifest(args.root))

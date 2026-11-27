@@ -5,7 +5,7 @@ components:
     implementation: methods.asr_guided_se.v1.data.VoiceBankPairs
     settings:
       manifest: data/work/asr_guided_se/voicebank_m15db.jsonl
-      corpus: data/corpora/asr_guided_se_sources
+      corpus: data/corpora
   model:
     implementation: methods.asr_guided_se.v1.model.SpeechEnhancementModel
     settings:

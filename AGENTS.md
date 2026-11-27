@@ -24,4 +24,5 @@ If there is no `.codegraph/` directory, skip CodeGraph entirely — indexing is 
 
 - 実験の起動・再開・評価と履歴の参照には `automl` CLI または `automl.experiment.Experiment` を使う。結果を報告するときは実行 ID を添え、比較では評価に使ったデータ分割、保存点、指標を確認する。[Experiment の公開 API](docs/30_detailed_design/01_experiment_api.md)
 - 履歴と保持する成果物の正本は `data/store/`、再生成できる索引や中間ファイルは `data/work/` に置く。外部コーパスのパスは計算機ごとの `.env` に設定する。[データの配置とバックアップ](docs/90_operations_and_maintenance/01_data_and_backup.md)
+- VoiceBank+DEMAND の SNR shift は `recipes/` の Git 管理 JSONL と `.env` で指定した原音から再現する。[音源の準備](docs/80_examples/asr_guided_se/README.md#環境と音源の準備)
 - 変更した領域は対応する `tests/` 配下のテストで確認する。テスト用の履歴や成果物には `data/mock/store/`、中間ファイルには `data/mock/work/` を使う。初回はプロジェクトルートで `make venv` を実行し、全体の確認には `make test` を使う。[テスト設計](docs/50_unit_testing/01_unit_test_design.md)

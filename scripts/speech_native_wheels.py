@@ -46,7 +46,7 @@ def export_wheel(directory, package, release, extension):
                                "from .ops.selective_scan_interface import mamba_inner_fn, selective_scan_fn\n"
                                "from .modules.mamba_simple import Mamba\n")
                 wheel.writestr(f"{info}/METADATA", f"Metadata-Version: 2.1\nName: mamba-ssm\nVersion: {version}\n"
-                               "Summary: Mamba-1 selective scan and normalization from the audio-db build\n"
+                               "Summary: Mamba-1 selective scan and normalization for PyTorch 2.6\n"
                                "License: Apache-2.0\nRequires-Dist: torch==2.6.0\nRequires-Dist: triton==3.2.0\n"
                                "Requires-Dist: einops\nRequires-Dist: packaging\nRequires-Dist: causal-conv1d==1.7.0\n")
             else:
