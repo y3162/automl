@@ -1,0 +1,576 @@
+"""SEMamba++ generator, ASR feature fusion and GAN module construction."""
+
+import math
+from dataclasses import dataclass
+
+import torch
+from torch import nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
+from torchaudio.functional import resample
+
+from .config import ASR_HOP, GUIDANCE_DIM, STFT_HOP, GuidanceV1
+from .discriminators import MultiResolutionDiscriminator, MultiScaleSubbandCQTDiscriminator
+from .fusion import fuse_asr_features, project_asr_features
+from .random import mix_seed, seed_model_init
+from .spectral import semamba_mag_phase_istft, semamba_mag_phase_stft
+
+
+@dataclass(frozen=True)
+class Architecture:
+    hid_feature: int = 48
+    num_tfmamba: int = 4
+    d_state: int = 16
+    d_conv: int = 4
+    expand: int = 2
+    norm_epsilon: float = 1e-5
+    scan_backend: str = "reference"
+    mrd_channels: int = 32
+    mrd_resolutions: tuple = ((1024, 120, 600), (2048, 240, 1200), (512, 50, 240))
+    cqt_channels: int = 128
+    cqt_hops: tuple = (512, 256, 256)
+    cqt_octaves: tuple = (8, 8, 8)
+    cqt_bins_per_octave: tuple = (12, 24, 36)
+
+    def __post_init__(self):
+        if self.scan_backend not in {"reference", "fused"}:
+            raise ValueError("scan_backend must be reference or fused")
+
+    def network(self):
+        return dict(hid_feature=self.hid_feature, num_tfmamba=self.num_tfmamba, d_state=self.d_state,
+                    d_conv=self.d_conv, expand=self.expand, norm_epsilon=self.norm_epsilon,
+                    input_channel=2, output_channel=1, n_fft=400, scan_backend=self.scan_backend)
+
+
+def _padding(kernel, dilation=1):
+    return int((kernel * dilation - dilation) / 2)
+
+
+_FUSED_RMS = None
+
+
+def _fused_rms_norm():
+    global _FUSED_RMS
+    if _FUSED_RMS is None:
+        try:
+            from mamba_ssm.ops.triton.layer_norm import rms_norm_fn
+        except ImportError as exc:
+            raise RuntimeError('fused selective scan requires mamba-ssm with CUDA extensions') from exc
+        _FUSED_RMS = rms_norm_fn
+    return _FUSED_RMS
+
+
+class RMSNorm(nn.Module):
+    def __init__(self, size, eps=1e-5):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size))
+        self.eps = eps
+
+    def forward(self, x, fused=False):
+        # The fused training path uses the same Triton RMSNorm as the external
+        # Mamba block. The reference path stays in PyTorch and does not import it.
+        if fused and x.is_cuda:
+            return _fused_rms_norm()(x, self.weight, None, eps=self.eps)
+        scale = torch.rsqrt(x.float().pow(2).mean(-1, keepdim=True) + self.eps)
+        return (x.float() * scale).type_as(x) * self.weight
+
+
+class ChannelLayerNorm(nn.Module):
+    def __init__(self, channels, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(channels))
+        self.bias = nn.Parameter(torch.zeros(channels))
+        self.eps = eps
+
+    def forward(self, x):
+        mean = x.mean(1, keepdim=True)
+        var = (x - mean).pow(2).mean(1, keepdim=True)
+        x = (x - mean) / torch.sqrt(var + self.eps)
+        return self.weight[:, None, None] * x + self.bias[:, None, None]
+
+
+class SelectiveSSM(nn.Module):
+    """Independent Mamba mixer with selectable scan implementation."""
+
+    def __init__(self, d_model, d_state=16, d_conv=4, expand=2, scan_backend='reference'):
+        super().__init__()
+        if scan_backend not in ('reference', 'fused'):
+            raise ValueError(f'unknown selective scan backend: {scan_backend!r}')
+        self.scan_backend = scan_backend
+        inner = int(expand * d_model)
+        self.d_state = d_state
+        self.dt_rank = math.ceil(d_model / 16)
+        self.in_proj = nn.Linear(d_model, inner * 2, bias=False)
+        self.conv1d = nn.Conv1d(inner, inner, d_conv, padding=d_conv - 1, groups=inner)
+        self.x_proj = nn.Linear(inner, self.dt_rank + d_state * 2, bias=False)
+        self.dt_proj = nn.Linear(self.dt_rank, inner)
+        # Mamba starts each channel with a log-uniform time step after softplus.
+        dt_scale = self.dt_rank ** -0.5
+        nn.init.uniform_(self.dt_proj.weight, -dt_scale, dt_scale)
+        with torch.no_grad():
+            dt = torch.rand_like(self.dt_proj.bias)
+            dt = torch.exp(dt * (math.log(0.1) - math.log(0.001)) + math.log(0.001)).clamp_min(1e-4)
+            self.dt_proj.bias.copy_(dt + torch.log(-torch.expm1(-dt)))
+        # S6 state matrix A_i = i. An uninitialized parameter is non-finite and
+        # makes the selective scan, and any waveform loss, non-finite.
+        state = torch.arange(1, d_state + 1, dtype=torch.float32)
+        self.A_log = nn.Parameter(torch.log(state).repeat(inner, 1))
+        self.D = nn.Parameter(torch.ones(inner))
+        self.out_proj = nn.Linear(inner, d_model, bias=False)
+
+    def forward(self, hidden):
+        # Official training calls mamba_inner_fn, which fuses the causal
+        # convolution, softplus, selective scan, SiLU gate, and output
+        # projection. Applying softplus outside selective_scan_fn changes the
+        # backward and drifts away from that update.
+        if self.scan_backend == 'fused' and hidden.is_cuda:
+            return _fused_mixer(self, hidden)
+        batch, length, _ = hidden.shape
+        x, z = self.in_proj(hidden).chunk(2, dim=-1)
+        x = x.transpose(1, 2)
+        # Left pad only. A symmetric Conv1d pad uses future samples.
+        kernel = int(self.conv1d.kernel_size[0])
+        x = F.conv1d(F.pad(x, (kernel - 1, 0)), self.conv1d.weight, self.conv1d.bias, groups=self.conv1d.groups)
+        x = F.silu(x).transpose(1, 2)
+        delta, b_mat, c_mat = torch.split(self.x_proj(x), [self.dt_rank, self.d_state, self.d_state], dim=-1)
+        delta = F.linear(delta, self.dt_proj.weight)
+        delta = F.softplus(delta + self.dt_proj.bias).transpose(1, 2)
+        state_a = -torch.exp(self.A_log.float())
+        scan_in = (
+            x.transpose(1, 2).float(),
+            delta.float(),
+            state_a,
+            b_mat.transpose(1, 2).float(),
+            c_mat.transpose(1, 2).float(),
+            self.D.float(),
+        )
+        # The reference scan keeps every timestep in the autograd graph. A 3 s
+        # full-width block does not fit in 16 GB that way. Recomputation keeps
+        # the same function and frees the timestep graph after the forward.
+        if torch.is_grad_enabled():
+            scan = checkpoint(_selective_scan, *scan_in, use_reentrant=False)
+        else:
+            scan = _selective_scan(*scan_in)
+        mixed = scan * F.silu(z.transpose(1, 2).float())
+        return self.out_proj(mixed.transpose(1, 2).type_as(hidden))
+
+
+def _fused_xz(module, hidden):
+    """Project to the official fused-mixer layout.
+
+    The view is ``(batch, channel, time)`` with stride ``(time, batch * time, 1)``.
+    Copying it to a contiguous tensor changes selective-scan backward.
+    """
+    batch, length, channels = hidden.shape
+    hidden = hidden.contiguous()
+    projected = module.in_proj.weight @ hidden.reshape(batch * length, channels).transpose(0, 1)
+    xz = projected.reshape(projected.shape[0], batch, length).permute(1, 0, 2)
+    if module.in_proj.bias is not None:
+        xz = xz + module.in_proj.bias.to(dtype=xz.dtype).view(1, -1, 1)
+    return xz
+
+
+def _fused_mixer(module, hidden):
+    xz = _fused_xz(module, hidden)
+    try:
+        from mamba_ssm.ops.selective_scan_interface import mamba_inner_fn
+    except ImportError as exc:
+        raise RuntimeError('fused selective scan requires mamba-ssm with CUDA extensions') from exc
+    return mamba_inner_fn(
+        xz,
+        module.conv1d.weight,
+        module.conv1d.bias,
+        module.x_proj.weight,
+        module.dt_proj.weight,
+        module.out_proj.weight,
+        module.out_proj.bias,
+        -torch.exp(module.A_log.float()),
+        None,
+        None,
+        module.D.float(),
+        delta_bias=module.dt_proj.bias.float(),
+        delta_softplus=True,
+    )
+
+
+def _selective_scan(u, delta, a_matrix, b_mat, c_mat, skip):
+    batch, dim, length = u.shape
+    nstate = a_matrix.shape[1]
+    delta_a = torch.exp(delta.unsqueeze(-1) * a_matrix.view(1, dim, 1, nstate))
+    delta_b_u = delta.unsqueeze(-1) * b_mat.permute(0, 2, 1).unsqueeze(1) * u.unsqueeze(-1)
+    state = u.new_zeros(batch, dim, nstate)
+    outputs = []
+    for index in range(length):
+        state = delta_a[:, :, index] * state + delta_b_u[:, :, index]
+        outputs.append(torch.einsum('bdn,bn->bd', state, c_mat[:, :, index]))
+    return torch.stack(outputs, dim=-1) + u * skip.view(1, -1, 1)
+
+
+class MambaResidual(nn.Module):
+    def __init__(self, d_model, d_state, d_conv, expand, eps, scan_backend='reference'):
+        super().__init__()
+        self.mixer = SelectiveSSM(d_model, d_state, d_conv, expand, scan_backend)
+        self.norm = RMSNorm(d_model, eps)
+
+    def forward(self, hidden, residual):
+        residual = hidden if residual is None else hidden + residual
+        fused = self.mixer.scan_backend == 'fused' and hidden.is_cuda
+        normalized = residual.to(dtype=self.norm.weight.dtype) if fused else residual
+        return self.mixer(self.norm(normalized, fused=fused)), residual
+
+
+class BidirectionalMamba(nn.Module):
+    def __init__(self, channels, d_state, d_conv, expand, eps, scan_backend='reference'):
+        super().__init__()
+        self.forward_blocks = nn.ModuleList([MambaResidual(channels, d_state, d_conv, expand, eps, scan_backend)])
+        self.backward_blocks = nn.ModuleList([MambaResidual(channels, d_state, d_conv, expand, eps, scan_backend)])
+
+    def forward(self, x):
+        forward, residual = x, None
+        for block in self.forward_blocks:
+            forward, residual = block(forward, residual)
+        forward = forward + residual
+        backward, residual = torch.flip(x, [1]), None
+        for block in self.backward_blocks:
+            backward, residual = block(backward, residual)
+        backward = torch.flip(backward + residual, [1])
+        return torch.cat((forward, backward), dim=-1)
+
+
+class FANLayer(nn.Module):
+    def __init__(self, input_dim, output_dim, p_ratio=0.25):
+        super().__init__()
+        periodic = int(output_dim * p_ratio)
+        gated = output_dim - 2 * periodic
+        self.input_linear_p = nn.Linear(input_dim, periodic)
+        self.input_linear_g = nn.Linear(input_dim, gated)
+
+    def forward(self, src):
+        periodic = self.input_linear_p(src)
+        gated = F.gelu(self.input_linear_g(src))
+        return torch.cat((torch.cos(periodic), torch.sin(periodic), gated), dim=-1)
+
+
+class FrequencyGate(nn.Module):
+    def __init__(self, bins, expansion):
+        super().__init__()
+        hidden = int(bins * expansion)
+        self.FAN1 = FANLayer(bins, hidden)
+        self.FAN2 = FANLayer(hidden, hidden)
+        self.Linear = nn.Linear(hidden, bins * 2)
+
+    def forward(self, src):
+        x = self.FAN2(self.FAN1(F.gelu(src)))
+        first, second = self.Linear(x).chunk(2, dim=-1)
+        return first * torch.sigmoid(second)
+
+
+class ChannelGate(nn.Module):
+    def __init__(self, channels, expansion):
+        super().__init__()
+        hidden = channels * expansion
+        self.layernorm = nn.LayerNorm(channels)
+        self.FAN1 = FANLayer(channels, hidden)
+        self.FAN2 = FANLayer(hidden, hidden)
+        self.Linear = nn.Linear(hidden, channels * 2)
+
+    def forward(self, src):
+        x = self.layernorm(F.gelu(src).permute(0, 2, 3, 1))
+        x = self.FAN2(self.FAN1(x))
+        first, second = self.Linear(x).chunk(2, dim=-1)
+        return (first * torch.sigmoid(second)).permute(0, 3, 1, 2)
+
+
+class LocalFrequencyMix(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+        self.conv1 = nn.Conv1d(channels, channels, 3, padding=1)
+        self.act1 = nn.GELU()
+        self.conv2 = nn.Conv1d(channels, channels, 3, padding=1)
+        self.act2 = nn.GELU()
+        self.conv3 = nn.Conv1d(channels, channels, 3, padding=1)
+        self.act3 = nn.GELU()
+
+    def forward(self, x):
+        batch, channels, time, freq = x.shape
+        value = x.permute(0, 2, 1, 3).reshape(batch * time, channels, freq)
+        mixed = self.act3(self.conv3(self.act2(self.conv2(self.act1(self.conv1(value))))))
+        return (value + mixed).view(batch, time, channels, freq).permute(0, 2, 1, 3)
+
+
+class FrequencyGLP(nn.Module):
+    def __init__(self, bins, channels, expansion):
+        super().__init__()
+        self.global_branch = FrequencyGate(bins, expansion)
+        self.local_branch = LocalFrequencyMix(channels)
+        self.linear = nn.Conv2d(channels * 2, channels, 1)
+
+    def forward(self, src):
+        return self.linear(torch.cat((self.global_branch(src), self.local_branch(src)), dim=1))
+
+
+class DenseBlock(nn.Module):
+    def __init__(self, channels, depth=4):
+        super().__init__()
+        layers = []
+        for index in range(depth):
+            dilation = 2 ** index
+            layers.append(nn.Sequential(
+                nn.Conv2d(channels * (index + 1), channels, (3, 3), dilation=(dilation, 1),
+                          padding=(_padding(3, dilation), _padding(3, 1))),
+                nn.InstanceNorm2d(channels, affine=True),
+                nn.PReLU(channels)))
+        self.dense_block = nn.ModuleList(layers)
+
+    def forward(self, x):
+        skip = x
+        for layer in self.dense_block:
+            x = layer(skip)
+            skip = torch.cat((x, skip), dim=1)
+        return x
+
+
+class LearnableSoftplus(nn.Module):
+    def __init__(self, bins):
+        super().__init__()
+        self.beta = nn.Parameter(torch.zeros(bins))
+
+    def forward(self, x):
+        beta = torch.exp(self.beta.clamp(max=40)).view(1, -1, 1)
+        return (1 / beta + 1e-6) * F.softplus(beta * x)
+
+
+class Bottleneck(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        width = cfg['hid_feature']
+        features = [width, width, width]
+        pad = ((3 - 1) // 2, (4 - 2) // 2)
+        self.downsamples = nn.ModuleList([
+            nn.Identity(),
+            nn.Sequential(nn.Conv2d(features[0], features[1], (3, 4), stride=(1, 2), padding=pad),
+                          nn.InstanceNorm2d(features[1], affine=True), nn.PReLU(features[1])),
+            nn.Sequential(nn.Conv2d(features[1], features[2], (3, 4), stride=(1, 2), padding=pad),
+                          nn.InstanceNorm2d(features[2], affine=True), nn.PReLU(features[2])),
+        ])
+        spec = (cfg['d_state'], cfg['d_conv'], cfg['expand'], cfg['norm_epsilon'], cfg.get('scan_backend', 'reference'))
+        self.time_mambas = nn.ModuleList([BidirectionalMamba(features[i], *spec) for i in range(3)])
+        self.freq_ffns = nn.ModuleList([FrequencyGLP(bins, features[i], 2) for i, bins in enumerate((100, 50, 25))])
+        self.freq_layernorm = nn.ModuleList([nn.LayerNorm(features[i]) for i in range(3)])
+        self.channel_ffns = nn.ModuleList([ChannelGate(features[i], 2) for i in range(3)])
+        self.tlinears = nn.ModuleList([nn.ConvTranspose1d(features[i] * 2, features[i], 1) for i in range(3)])
+        self.upsamples = nn.ModuleList([
+            nn.Sequential(nn.ConvTranspose2d(features[2], features[1], (3, 4), stride=(1, 2), padding=(1, 1)),
+                          nn.InstanceNorm2d(features[1], affine=True), nn.PReLU(features[1])),
+            nn.Sequential(nn.ConvTranspose2d(features[1], features[0], (3, 4), stride=(1, 2), padding=(1, 1)),
+                          nn.InstanceNorm2d(features[0], affine=True), nn.PReLU(features[0])),
+        ])
+        self.gates = nn.ModuleList([
+            nn.Sequential(nn.Conv2d(features[1] * 2, features[1], 1), nn.GELU(), ChannelLayerNorm(features[1])),
+            nn.Sequential(nn.Conv2d(features[0] * 2, features[0], 1), nn.GELU(), ChannelLayerNorm(features[0])),
+        ])
+
+    def _time(self, value, index):
+        batch, channels, time, freq = value.shape
+        sequence = value.permute(0, 3, 2, 1).reshape(batch * freq, time, channels)
+        mixed = self.tlinears[index](self.time_mambas[index](sequence).permute(0, 2, 1)).permute(0, 2, 1)
+        sequence = mixed + sequence
+        sequence = sequence.view(batch, freq, time, channels).permute(0, 2, 1, 3).reshape(batch * time, freq, channels)
+        sequence = self.freq_layernorm[index](sequence)
+        spectrum = sequence.view(batch, time, freq, channels).permute(0, 3, 1, 2)
+        spectrum = self.freq_ffns[index](spectrum) + spectrum
+        return self.channel_ffns[index](spectrum) + spectrum
+
+    def forward(self, x):
+        base = self.downsamples[0](x)
+        mid = self.downsamples[1](base)
+        low = self.downsamples[2](mid)
+        level1 = self._time(base, 0)
+        level2 = self._time(mid, 1)
+        level3 = self._time(low, 2)
+        merged = self.gates[0](torch.cat((level2, self.upsamples[0](level3)), dim=1))
+        merged = self.gates[1](torch.cat((level1, self.upsamples[1](merged)), dim=1))
+        return level1 + merged
+
+
+class SEMambaPP(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        channels = cfg['hid_feature']
+        bins = cfg['n_fft'] // 2 + 1
+        self.dense_encoder = nn.Module()
+        self.dense_encoder.dense_conv_1 = nn.Sequential(
+            nn.Conv2d(cfg['input_channel'], channels, (1, 1)),
+            nn.InstanceNorm2d(channels, affine=True), nn.PReLU(channels))
+        self.dense_encoder.dense_block = DenseBlock(channels)
+        self.dense_encoder.dense_conv_2 = nn.Sequential(
+            nn.Conv2d(channels, channels, (1, 3), stride=(1, 2)),
+            nn.InstanceNorm2d(channels, affine=True), nn.PReLU(channels))
+        self.TSMamba = nn.ModuleList([Bottleneck(cfg) for _ in range(cfg['num_tfmamba'])])
+        self.mask_decoder = nn.Module()
+        self.mask_decoder.dense_block = DenseBlock(channels)
+        self.mask_decoder.mask_conv = nn.Sequential(
+            nn.ConvTranspose2d(channels, channels, (1, 3), stride=(1, 2)),
+            nn.Conv2d(channels, cfg['output_channel'], (1, 1)),
+            nn.InstanceNorm2d(cfg['output_channel'], affine=True),
+            nn.PReLU(cfg['output_channel']),
+            nn.Conv2d(cfg['output_channel'], cfg['output_channel'], (1, 1)))
+        self.mask_decoder.softplus = LearnableSoftplus(bins)
+        self.phase_decoder = nn.Module()
+        self.phase_decoder.dense_block = DenseBlock(channels)
+        self.phase_decoder.phase_conv = nn.Sequential(
+            nn.ConvTranspose2d(channels, channels, (1, 3), stride=(1, 2)),
+            nn.InstanceNorm2d(channels, affine=True), nn.PReLU(channels))
+        self.phase_decoder.phase_conv_r = nn.Conv2d(channels, cfg['output_channel'], (1, 1))
+        self.phase_decoder.phase_conv_i = nn.Conv2d(channels, cfg['output_channel'], (1, 1))
+
+    def _encode(self, magnitude, phase):
+        x = torch.cat((magnitude.transpose(1, 2).unsqueeze(1), phase.transpose(1, 2).unsqueeze(1)), dim=1)
+        x = self.dense_encoder.dense_conv_2(self.dense_encoder.dense_block(self.dense_encoder.dense_conv_1(x)))
+        return x
+
+    def forward(self, magnitude, phase, *conditioning):
+        x = self._encode(magnitude, phase, *conditioning)
+        for block in self.TSMamba:
+            x = block(x)
+        mask = self.mask_decoder.mask_conv(self.mask_decoder.dense_block(x))
+        mask = self.mask_decoder.softplus(mask.squeeze(1).transpose(1, 2))
+        phase_h = self.phase_decoder.phase_conv(self.phase_decoder.dense_block(x))
+        phase_out = torch.atan2(self.phase_decoder.phase_conv_i(phase_h), self.phase_decoder.phase_conv_r(phase_h))
+        phase_out = phase_out.squeeze(1).transpose(1, 2)
+        return mask, phase_out
+
+
+class GuidedSEMambaPP(SEMambaPP):
+    """Official SEMamba++ plus the v1 projection and 1x1 fusion."""
+
+    def __init__(self, cfg, encoder_dim: int, encoder_layer: int) -> None:
+        super().__init__(cfg)
+        if isinstance(encoder_dim, bool) or int(encoder_dim) < 1:
+            raise ValueError(f"encoder_dim must be positive, got {encoder_dim}")
+        if isinstance(encoder_layer, bool) or int(encoder_layer) < 0:
+            raise ValueError(f"encoder_layer must be >= 0, got {encoder_layer}")
+        channels = int(cfg["hid_feature"])
+        self.asr_proj = nn.Linear(int(encoder_dim), GUIDANCE_DIM)
+        self.asr_fuse = nn.Conv2d(channels + GUIDANCE_DIM, channels, (1, 1))
+        self.register_buffer(
+            "encoder_layer_index",
+            torch.tensor(int(encoder_layer), dtype=torch.long),
+            persistent=True,
+        )
+
+    def _encode(self, magnitude, phase, hidden, asr_lengths):
+        dense = super()._encode(magnitude, phase)
+        aligned = project_asr_features(self.asr_proj, hidden, dense.shape[2], asr_lengths)
+        return fuse_asr_features(self.asr_fuse, dense, aligned)
+
+
+class GuidedSEMambaPPGenerator(nn.Module):
+    """Training forward on a pair of 16 kHz waveforms. Only SEMamba++ owns trainable parameters."""
+
+    n_fft = win = 400
+    hop = STFT_HOP
+    sampling_rate = 16000
+    compress = 0.3
+
+    def __init__(self, base, architecture, guidance, seed, asr=None):
+        super().__init__()
+        self.guidance = guidance
+        self._asr_holder = [asr] if asr is not None else []
+        self.generator = base
+        if guidance.asr_features_enabled:
+            asr = self.recognizer()
+            layer = guidance.encoder_layer
+            if not 0 <= layer < asr.encoder_layers:
+                raise ValueError(f"encoder_layer {layer} is outside the Parakeet encoder")
+            with seed_model_init(mix_seed("asr-guidance-scratch", seed)):
+                guided = GuidedSEMambaPP(architecture.network(), asr.encoder_dim, layer)
+            # Copy the seeded base network. Only the fusion uses the layer-dependent seed.
+            state = guided.state_dict()
+            state.update(self.generator.state_dict())
+            guided.load_state_dict(state, strict=True)
+            with seed_model_init(mix_seed("asr-guidance-v1", seed, layer)):
+                guided.asr_proj.reset_parameters()
+                guided.asr_fuse.reset_parameters()
+            self.generator = guided
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        layer = state_dict.get("generator.encoder_layer_index")
+        if layer is not None and int(layer) != self.guidance.encoder_layer:
+            raise ValueError("The checkpoint fusion layer differs from encoder_layer")
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+
+    def recognizer(self):
+        if not self._asr_holder:
+            from .parakeet import FrozenParakeet
+
+            self._asr_holder.append(FrozenParakeet())
+        asr = self._asr_holder[0]
+        if asr.samples_per_encoder_frame != ASR_HOP:
+            raise ValueError(f"Parakeet must have {ASR_HOP} samples per encoder frame")
+        asr.requires_grad_(False).eval()
+        return asr.to(next(self.generator.parameters()).device)
+
+    def _estimate(self, noisy, magnitude, phase, lengths):
+        if not self.guidance.asr_features_enabled:
+            return self.generator(magnitude, phase)
+        if lengths is None:
+            lengths = noisy.new_full((len(noisy),), noisy.shape[-1], dtype=torch.long)
+        with torch.no_grad():
+            hidden, encoded_length = self.recognizer().encode_layer(noisy, lengths, self.guidance.encoder_layer)
+        return self.generator(magnitude, phase, hidden.detach(), encoded_length.detach())
+
+    def forward(self, clean, noisy, lengths=None):
+        if clean.ndim != 2 or clean.shape != noisy.shape:
+            raise ValueError("Expected matching [batch, time] clean and noisy waveforms")
+        clean_mag, clean_phase, clean_complex = semamba_mag_phase_stft(clean, self.n_fft, self.hop, self.win)
+        noisy_mag, noisy_phase, _ = semamba_mag_phase_stft(noisy, self.n_fft, self.hop, self.win)
+        mag, phase = self._estimate(noisy, noisy_mag, noisy_phase, lengths)
+        complex_spec = torch.stack((mag * torch.cos(phase), mag * torch.sin(phase)), dim=-1)
+        audio = semamba_mag_phase_istft(mag, phase, self.n_fft, self.hop, self.win, length=noisy.shape[-1])
+        _, _, recomputed = semamba_mag_phase_stft(audio, self.n_fft, self.hop, self.win, addeps=True)
+        return dict(clean_mag=clean_mag, clean_phase=clean_phase, clean_complex=clean_complex,
+                    mag=mag, phase=phase, complex=complex_spec, recomputed=recomputed, audio=audio)
+
+    @torch.inference_mode()
+    def enhance(self, waveform, sample_rate=16000):
+        """Enhance one mono waveform, preserving its sample rate, length and peak scale."""
+        if waveform.ndim != 1 or waveform.numel() == 0 or not waveform.is_floating_point():
+            raise ValueError("Expected a nonempty floating-point mono waveform")
+        device = next(self.generator.parameters()).device
+        audio = resample(waveform.to(device, torch.float32), sample_rate, self.sampling_rate)
+        if not torch.any(audio):
+            return waveform.clone()
+        if audio.numel() <= self.n_fft // 2:
+            raise ValueError("The centered STFT needs more than 200 samples at 16 kHz")
+        peak = audio.abs().max().clamp_min(1e-9)
+        noisy = (audio / peak).view(1, -1)
+        window = torch.hann_window(self.win, device=device)
+        spec = torch.stft(noisy, self.n_fft, self.hop, self.win, window, return_complex=True)
+        mag, phase = self._estimate(noisy, spec.abs().pow(self.compress), spec.angle(), None)
+        magnitude = mag.pow(1 / self.compress)
+        spectrum = torch.complex(magnitude * torch.cos(phase), magnitude * torch.sin(phase))
+        enhanced = torch.istft(spectrum, self.n_fft, self.hop, self.win, window, length=audio.numel())[0] * peak
+        output = resample(enhanced, self.sampling_rate, sample_rate)
+        return torch.nn.functional.pad(output[:waveform.numel()], (0, max(0, waveform.numel() - len(output)))).to(waveform)
+
+
+class _Discriminator(nn.Module):
+    def __init__(self, discriminator):
+        super().__init__()
+        self.discriminator = discriminator
+
+    def forward(self, clean, enhanced=None):
+        return self.discriminator(clean, enhanced)
+
+
+def build_modules(config: Architecture, guidance: GuidanceV1, seed: int, *, asr=None) -> dict[str, nn.Module]:
+    # The reference initializes G, MRD, then CQT on one CPU random stream.
+    with seed_model_init(seed):
+        base = SEMambaPP(config.network())
+        mrd = _Discriminator(MultiResolutionDiscriminator(config.mrd_resolutions, config.mrd_channels))
+        cqt = _Discriminator(MultiScaleSubbandCQTDiscriminator(
+            16000, config.cqt_hops, config.cqt_octaves, config.cqt_bins_per_octave, config.cqt_channels,
+        ))
+    generator = GuidedSEMambaPPGenerator(base, config, guidance, seed, asr)
+    return {"generator": generator, "mrd": mrd, "cqt": cqt}

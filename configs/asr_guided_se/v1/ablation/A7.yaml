@@ -1,0 +1,8 @@
+extends: configs/asr_guided_se/v1/ablation/A0.yaml
+components:
+  model:
+    settings:
+      guidance:
+        asr_features_enabled: true
+        tdt_loss_enabled: true
+        error_weight_enabled: true

@@ -1,0 +1,8 @@
+extends: configs/asr_guided_se/v1/ablation/A0.yaml
+components:
+  model:
+    settings:
+      guidance:
+        error_weight_enabled: true
+  trainer:
+    settings: {micro_batch_size: 4}

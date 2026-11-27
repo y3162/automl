@@ -1,0 +1,33 @@
+# VoiceBank 28 speakers, official test split for WER selection, shared valid-frame mean.
+plan: [train]
+components:
+  dataset:
+    implementation: methods.asr_guided_se.v1.data.VoiceBankPairs
+    settings:
+      manifest: data/work/asr_guided_se/voicebank_m15db.jsonl
+      corpus: data/corpora/asr_guided_se_sources
+  model:
+    implementation: methods.asr_guided_se.v1.model.SpeechEnhancementModel
+    settings:
+      backbone: semambapp
+      seed: 42
+      architecture: {scan_backend: fused}
+      guidance:
+        asr_features_enabled: false
+        encoder_layer: 15
+        error_weight_enabled: false
+        error_weight_alpha: 1.0
+        tdt_loss_enabled: false
+  trainer:
+    implementation: methods.asr_guided_se.v1.trainer.GuidedSEMambaPPTrainer
+    settings:
+      device: cuda
+      epochs: 100
+      batch_size: 8
+      micro_batch_size: 8
+      window: 48000
+      valid_frame_aggregation: true
+      selection_metric: wer
+  validation:
+    implementation: methods.asr_guided_se.v1.evaluation.WordErrorRate
+    settings: {split: test, device: cuda}

@@ -1,0 +1,5 @@
+# One complete update with all three guidance mechanisms.
+extends: configs/asr_guided_se/v1/ablation/A7.yaml
+components:
+  trainer:
+    settings: {max_steps: 1, batch_size: 1, micro_batch_size: 1}
