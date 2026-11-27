@@ -7,8 +7,8 @@
 Python 3.11 以上を用意し、リポジトリのルートで次を実行する。訓練・検証・テスト用のデータは各4件で、設定ファイルに含まれる。[XOR の設定](configs/examples/xor/inline.yaml)
 
 ```bash
-make venv
-source .venvs/test/bin/activate
+make venv-examples
+source .venvs/examples/bin/activate
 
 # CLI が返す JSON から ID を取り出す。
 json_field() {
@@ -32,4 +32,4 @@ automl history --run "$run_id" --summary
 
 ## 開発と運用
 
-`make venv` の後、`make test` でテストを実行する。実装の配置、実験履歴の保存と復元、エージェントの作業指示は次を参照する。[手法の配置と版管理](docs/90_operations_and_maintenance/03_source_layout_and_versions.md)・[データの配置とバックアップ](docs/90_operations_and_maintenance/01_data_and_backup.md)・[エージェント向け作業指示](AGENTS.md)
+`make venv-examples`、`make venv-mlflow` と [音声環境の準備](docs/80_examples/asr_guided_se/README.md)の後、`make test` で対象ごとに対応する環境を使ってテストする。実装の配置、実験履歴の保存と復元、エージェントの作業指示は次を参照する。[手法の配置と版管理](docs/90_operations_and_maintenance/03_source_layout_and_versions.md)・[データの配置とバックアップ](docs/90_operations_and_maintenance/01_data_and_backup.md)・[エージェント向け作業指示](AGENTS.md)

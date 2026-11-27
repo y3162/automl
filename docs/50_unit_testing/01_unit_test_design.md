@@ -81,10 +81,10 @@ Evaluator が返す完了判定、Experiment が保存した確定件数、履�
 
 追加分は、まず `Model.build` の復元条件、`evaluate` の入力と完了判定、実行全体の終了判定から着手する。これらを取り違えると、別の状態から学習を再開したり、失敗した実行を成功として後続の実験に使ったりする。次に、設定検証、使用履歴、変換の再適用、ページ境界、表示用指標を補う。
 
-プロジェクトルートで `make venv` を実行するとテスト用環境ができる。既存の設定・使用履歴・恒等変換のケースを選んで実行する例を示す。単体・結合・システムを含む既存スイート全体の回帰確認には `make test` を使う。
+プロジェクトルートで `make venv-examples` を実行すると共通基盤と examples のテスト環境ができる。既存の設定・使用履歴・恒等変換のケースを選んで実行する例を示す。全体の `make test` には MLflow と音声の環境も必要となる。[環境の準備](../90_operations_and_maintenance/02_make_and_scripts.md#make-ターゲット)
 
 ```sh
-.venvs/test/bin/python -m pytest -q \
+.venvs/examples/bin/python -m pytest -q \
   tests/automl/experiment/test_config.py \
   tests/automl/dataset/test_usage.py \
   tests/automl/transform/test_identity.py

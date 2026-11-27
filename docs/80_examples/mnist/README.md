@@ -4,16 +4,16 @@
 
 ## 初回の準備
 
-プロジェクトルートで `make venv` を実行する。`.env` がなければ `.env.example` をコピーし、次の設定を実データの置き場に合わせる。このディレクトリには非圧縮の IDX ファイル 4 個（train と t10k の images・labels）を置く。
+プロジェクトルートで `make venv-examples` を実行する。`.env` がなければ `.env.example` をコピーし、次の設定を実データの置き場に合わせる。このディレクトリには非圧縮の IDX ファイル 4 個（train と t10k の images・labels）を置く。
 
 ```sh
 MNIST_ROOT=/net/spring/work/seki/database
 ```
 
 ```sh
-make setup-data
+make setup-data VENV=.venvs/examples
 readlink data/corpora/mnist
-. .venvs/test/bin/activate
+. .venvs/examples/bin/activate
 export CUDA_VISIBLE_DEVICES='' OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 ```
 
@@ -43,7 +43,7 @@ PY
 
 `automl history --summary` で分岐元・評価に使った保存点・集計値を一覧できる。`automl verify` は正本全体の履歴と成果物を照合する。復元時は `data/store/` をコピーし、同じ版の外部 IDX を復元先の `.env` に設定して `make setup-data` を実行する。各実行の `automl verify --run RUN` が `ready: true` を返すことを確認する。
 
-実データの配置に依存しない回帰試験は `python -m pytest -q tests/examples/mnist`、全体は `make test` で実行できる。
+実データの配置に依存しない回帰試験は `.venvs/examples/bin/python -m pytest -q tests/examples/mnist` で実行できる。全体の `make test` には MLflow と音声の各環境も必要となる。
 
 MLflow を使う場合は、同じ仮想環境で `python -m pip install -e '.[mlflow]'` を実行し、`python -m automl.mlflow` で同期する。表示用の DB は `data/work/mlflow/tracking.db` に作られる。分類では訓練損失と正解率、GAN では生成器・識別器それぞれの訓練損失と、検証・テストの識別器損失を比較できる。
 
