@@ -1,0 +1,25 @@
+{
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
+    "workbench.colorTheme": "GitHub Dark Dimmed",
+    "workbench.iconTheme": "catppuccin-frappe",
+    "editor.cursorBlinking": "expand",
+    "editor.formatOnSave": true,
+    "workbench.editorAssociations": {
+        "*.csv": "default",
+        // "*.md": "markdown-preview-enhanced",
+        "*.pdf": "pdf.preview",
+        "*.parquet": "parquet-visualizer.parquetVisualizer",
+        "*.duckdb": "duckdb.dataFileViewer",
+        "*.tsv": "duckdb.dataFileViewer",
+        "*.xlsx": "duckdb.dataFileViewer"
+    },
+    "workbench.colorCustomizations": {
+        "gitDecoration.modifiedResourceForeground": "#ff8c00",
+        "gitDecoration.addedResourceForeground": "#00bfff",
+        "gitDecoration.deletedResourceForeground": "#ff0000",
+        "gitDecoration.untrackedResourceForeground": "#00ff7f",
+        "gitDecoration.ignoredResourceForeground": "#696969",
+        "gitDecoration.conflictingResourceForeground": "#e4676b"
+    }
+}

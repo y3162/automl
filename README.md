@@ -1,13 +1,35 @@
 # automl
 
-`make setup-data` で、`.env` に指定した LibriSpeech、VoiceBank+DEMAND など19種類の音声コーパスから検索用の DuckDB 索引を作成できる。[音声コーパスの準備](docs/90_operations_and_maintenance/02_make_and_scripts.md#音声コーパスの準備)
+機械学習の実験をローカルで実行し、実行 ID から使用データ、設定、評価結果、保存点をたどるための実験基盤。人もエージェントも、同じ CLI または Python API で学習を開始し、保存点から再開・再評価できる。[Experiment の公開 API](docs/30_detailed_design/01_experiment_api.md)
 
-[MNIST の CPU 実験](docs/80_examples/mnist/README.md)では、外部データの準備から数字分類・GAN の学習、保存点の再評価と成果物の確認までを実行できる。
+## 最初の実験（XOR）
 
-[ASR-guided SEMamba++](docs/80_examples/asr_guided_se/README.md) は、VoiceBank 音声を使った学習と、Parakeet の特徴・TDT 損失・認識誤り重み付けの8条件を実行できる。
+Python 3.11 以上を用意し、リポジトリのルートで次を実行する。訓練・検証・テスト用のデータは各4件で、設定ファイルに含まれる。[XOR の設定](configs/examples/xor/inline.yaml)
 
-## XOR のモデル比較
+```bash
+make venv
+source .venvs/test/bin/activate
 
-同じ CSV の訓練320件を使い、TinyMLP と、2つの入力の積を特徴にするロジスティック回帰を比較した。TinyMLP は25更新ごとの検証で第50更新に初めて96/96に達し、第100更新で学習を終了した。積を使うモデルは第1更新で96/96に達して早期終了した。別のテスト96件では両モデルとも全問正解だった。[TinyMLP の設定](configs/examples/xor/full_batch.yaml)・[積を使うモデルの設定](configs/examples/xor/product_target.yaml)
+# CLI が返す JSON から ID を取り出す。
+json_field() {
+    python -c 'import json, sys; print(json.load(sys.stdin)[sys.argv[1]])' "$1"
+}
 
-テスト評価の実行 ID は TinyMLP が `R764eccd695eb4f6d9a0c27829973c77e`、積を使うモデルが `R6212d10d2ad744a19561b42701e17d4c`。`automl history --run 実行ID --summary` で評価に使った保存点と結果を確認できる。
+branch_id=$(automl branch | json_field branch_id)
+run_id=$(automl start --branch "$branch_id" configs/examples/xor/inline.yaml | json_field run_id)
+automl wait "$run_id"
+automl history --run "$run_id" --summary
+```
+
+`branch` は実験履歴に新しい枝を作り、`start` はその枝で学習と評価を開始する。`wait` の `status` が `succeeded` になれば完了。同じ実行 ID で後から `history` を呼ぶと、評価に使った保存点と集計結果を確認できる。
+
+## 実験例とデータ準備
+
+- **XOR のモデル比較**。同梱の CSV を使った比較では、TinyMLP と入力の積を使うロジスティック回帰が、ともにテスト96件に全問正解した。[設定・学習経過・実行 ID](docs/80_examples/xor/README.md)
+- **MNIST**。CPU で数字分類と GAN を学習し、保存点の再評価と成果物の確認まで試せる。[MNIST の CPU 実験](docs/80_examples/mnist/README.md)
+- **音声コーパスの準備**。`.env.example` をもとに利用するコーパスのパスを `.env` に書き、`make setup-data` で検索用の DuckDB 索引を作る。LibriSpeech、VoiceBank+DEMAND など19種類に対応する。[音声コーパスの準備](docs/90_operations_and_maintenance/02_make_and_scripts.md#音声コーパスの準備)
+- **ASR-guided SEMamba++**。VoiceBank 音声の強調を学習し、Parakeet の特徴・TDT 損失・認識誤りによる重み付けを組み合わせた8条件を比較できる。[環境構築と実験設定](docs/80_examples/asr_guided_se/README.md)
+
+## 開発と運用
+
+`make venv` の後、`make test` でテストを実行する。実装の配置、実験履歴の保存と復元、エージェントの作業指示は次を参照する。[手法の配置と版管理](docs/90_operations_and_maintenance/03_source_layout_and_versions.md)・[データの配置とバックアップ](docs/90_operations_and_maintenance/01_data_and_backup.md)・[エージェント向け作業指示](AGENTS.md)

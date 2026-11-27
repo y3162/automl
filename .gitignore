@@ -1,18 +1,13 @@
-/.vscode/
 /.env
-/.agents/
-/.codex/
-/.cursor/
-/AGENTS.md
-/CLAUDE.md
 
-/.codegraph/
 /.venvs/*
 !/.venvs/.gitkeep
 /**/__pycache__/
+
+/.codegraph/
 /data/*
 !/data/.gitkeep
 
 *.py[cod]
 *.egg-info/
-.pytest_cache/
+/.pytest_cache/
