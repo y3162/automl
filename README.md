@@ -1,5 +1,7 @@
 # automl
 
+`make setup-data` で、`.env` に指定した LibriSpeech、VoiceBank+DEMAND など19種類の音声コーパスから検索用の DuckDB 索引を作成できる。[音声コーパスの準備](docs/90_operations_and_maintenance/02_make_and_scripts.md#音声コーパスの準備)
+
 [MNIST の CPU 実験](docs/80_examples/mnist/README.md)では、外部データの準備から数字分類・GAN の学習、保存点の再評価と成果物の確認までを実行できる。
 
 ## XOR のモデル比較

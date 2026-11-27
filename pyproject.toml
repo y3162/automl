@@ -7,7 +7,7 @@ name = "automl"
 version = "0.1.0"
 description = "Local, reproducible machine learning experiments"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6,<7", "numpy>=1.26,<3"]
+dependencies = ["PyYAML>=6,<7", "numpy>=1.26,<3", "duckdb>=1.4,<3", "soundfile>=0.13,<1"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
@@ -18,7 +18,7 @@ automl = "automl.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["automl*", "examples*"]
+include = ["automl*", "corpora*", "examples*"]
 namespaces = false
 
 [tool.pytest.ini_options]

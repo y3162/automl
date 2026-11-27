@@ -1,6 +1,8 @@
 VENV ?= .venvs/test
 PYTHON ?= python3
 VENV_PYTHON = $(VENV)/bin/python
+JOBS ?= 4
+export CORPUS JOBS
 
 .PHONY: venv setup-data test
 venv:
